@@ -1,0 +1,40 @@
+{
+  "generated_at": "2026-06-16T21:39:34Z",
+  "scenario": "scenario_2_idt",
+  "label": "PoC-Grounded (iDT1a vs. iDT1b)",
+  "description": "QoS values derived from cDT1 ProviderConfig in the PoC Go implementation. iDT1a is the primary inspection-robot provider; iDT1b is the fallback.",
+  "base_seed": 42,
+  "runs": 30,
+  "policies": [
+    "baseline",
+    "qos_aware",
+    "uncertainty_aware"
+  ],
+  "provider_a": {
+    "acc_mean": 0.95,
+    "lat_mean": 12.0,
+    "rel_mean": 0.97,
+    "sigma_q": 0.08,
+    "sigma_a": 0.06
+  },
+  "provider_b": {
+    "acc_mean": 0.88,
+    "lat_mean": 18.0,
+    "rel_mean": 0.93,
+    "sigma_q": 0.02,
+    "sigma_a": 0.02
+  },
+  "weights": {
+    "w_acc": 0.45,
+    "w_lat": 0.2,
+    "w_rel": 0.35
+  },
+  "risk_q": 1.5,
+  "risk_a": 1.5,
+  "avail_threshold": 0.15,
+  "util_threshold": 0.55,
+  "hysteresis": 0.05,
+  "sim_duration_s": 120,
+  "recovery_s": 10,
+  "episode_count": 2
+}
