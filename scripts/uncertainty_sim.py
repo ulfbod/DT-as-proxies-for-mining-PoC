@@ -98,6 +98,8 @@ UNCERTAINTY_SCENARIOS: dict[str, dict] = {
             "σ is small enough that risk adjustment barely changes rankings. "
             "The baseline is still visibly weaker during degradation episodes."
         ),
+        "label_a": "Provider A",
+        "label_b": "Provider B",
         # Provider A — quality sensor: higher accuracy, slower, higher σ
         "prov_a": {
             "acc_mean": 0.92, "lat_mean": 35.0, "rel_mean": 0.95,
@@ -138,6 +140,8 @@ UNCERTAINTY_SCENARIOS: dict[str, dict] = {
             "deterministic QoS-aware policy. At nominal QoS the two policies may still "
             "agree, but during degradation P3 switches away from A earlier and more reliably."
         ),
+        "label_a": "Provider A",
+        "label_b": "Provider B",
         "prov_a": {
             "acc_mean": 0.92, "lat_mean": 35.0, "rel_mean": 0.95,
             "sigma_q":  0.08,
@@ -179,6 +183,8 @@ UNCERTAINTY_SCENARIOS: dict[str, dict] = {
             "provider B throughout the simulation, while the QoS-aware policy prefers A. "
             "Three degradation episodes make the relative advantage unmistakable."
         ),
+        "label_a": "Provider A",
+        "label_b": "Provider B",
         "prov_a": {
             "acc_mean": 0.93, "lat_mean": 30.0, "rel_mean": 0.96,
             "sigma_q":  0.18,
@@ -203,6 +209,34 @@ UNCERTAINTY_SCENARIOS: dict[str, dict] = {
         "degrade_window":   ( 8.0, 14.0),
         "fail_window":      ( 6.0, 12.0),
         "inter_gap":        (10.0, 18.0),
+    },
+
+    "scenario_2_idt": {
+        "label": "PoC-Grounded (iDT1a vs. iDT1b)",
+        "description": (
+            "QoS values derived from cDT1 ProviderConfig in the PoC Go implementation. "
+            "iDT1a is the primary inspection-robot provider; iDT1b is the fallback."
+        ),
+        "label_a": "iDT1a (primary, inspection robot)",
+        "label_b": "iDT1b (fallback, inspection robot)",
+        "prov_a": {"acc_mean": 0.95, "lat_mean": 12.0, "rel_mean": 0.97,
+                   "sigma_q": 0.08, "sigma_a": 0.06},
+        "prov_b": {"acc_mean": 0.88, "lat_mean": 18.0, "rel_mean": 0.93,
+                   "sigma_q": 0.02, "sigma_a": 0.02},
+        "weights":            (0.45, 0.20, 0.35),
+        "risk_q":             1.5,
+        "risk_a":             1.5,
+        "avail_threshold":    0.15,
+        "util_threshold":     0.55,
+        "hysteresis":         0.05,
+        "sim_duration_s":     120,
+        "recovery_s":         10,
+        "episode_count":      2,
+        "degrade_rate":       (0.05, 0.12),
+        "onset_range":        (15.0, 25.0),
+        "degrade_window":     (8.0, 14.0),
+        "fail_window":        (6.0, 12.0),
+        "inter_gap":          (12.0, 20.0),
     },
 }
 
@@ -493,6 +527,14 @@ def _run_single(seed: int, run_idx: int, cfg: dict) -> list[dict]:
             active["uncertainty_aware"], meas_qos, sigma_q, sigma_a,
             risk_q, risk_a, w_acc, w_lat, w_rel, util_thr, hysteresis)
 
+        # Utilities of both providers at this timestep (policy-independent)
+        tq_a = true_qos["prov_a"]
+        tq_b = true_qos["prov_b"]
+        utility_a = compute_utility(tq_a["acc"], tq_a["lat_ms"], tq_a["rel"],
+                                    w_acc, w_lat, w_rel)
+        utility_b = compute_utility(tq_b["acc"], tq_b["lat_ms"], tq_b["rel"],
+                                    w_acc, w_lat, w_rel)
+
         # True utility of selected provider for each policy
         for pol in POLICIES:
             sel = active[pol]
@@ -516,6 +558,8 @@ def _run_single(seed: int, run_idx: int, cfg: dict) -> list[dict]:
                 "sigma_a_A":        round(sigma_a["prov_a"], 6),
                 "sigma_a_B":        round(sigma_a["prov_b"], 6),
                 "failover_event":   1 if active[pol] != prev_active[pol] else 0,
+                "utility_a":        round(utility_a, 6),
+                "utility_b":        round(utility_b, 6),
             })
 
     return rows
@@ -536,6 +580,7 @@ def run_scenario(scenario_key: str, runs: int, base_seed: int,
         "sigma_q_selected", "sigma_a_selected",
         "sigma_q_A", "sigma_q_B", "sigma_a_A", "sigma_a_B",
         "failover_event",
+        "utility_a", "utility_b",
     ]
 
     all_rows: list[dict] = []
@@ -654,6 +699,121 @@ def _save(fig, directory: Path, name: str) -> None:
     plt.close(fig)
 
 
+def _plot_provider_comparison(data_dir: Path, fig_dir: Path, scenario_key: str,
+                               cfg: dict, util_by: dict, util_a_by: dict,
+                               util_b_by: dict, ts: list) -> None:
+    """Plot iDT-level and cDT-level utility to show cascade effect."""
+    label_a = cfg.get("label_a", "Provider A")
+    label_b = cfg.get("label_b", "Provider B")
+
+    fig, ax = plt.subplots(figsize=(COL_W, ROW_H * 1.5))
+
+    x, mA, p10A, p90A = _band(util_a_by, ts)
+    x, mB, p10B, p90B = _band(util_b_by, ts)
+    _plot_band(ax, x, mA, p10A, p90A, C_PROV_A, "-", None,
+               label_med=f"{label_a} utility")
+    _plot_band(ax, x, mB, p10B, p90B, C_PROV_B, "--", None,
+               label_med=f"{label_b} utility")
+
+    x, mQ, p10Q, p90Q = _band(util_by["qos_aware"], ts)
+    x, mBL, p10BL, p90BL = _band(util_by["baseline"], ts)
+    _plot_band(ax, x, mQ, p10Q, p90Q, C_QOS, "-.", "o",
+               label_med="cDT1 under QoS-aware")
+    _plot_band(ax, x, mBL, p10BL, p90BL, C_BASELINE, ":", "s",
+               label_med="cDT1 under availability-based")
+
+    ax.set_xlabel("Simulation time (s)")
+    ax.set_ylabel("Utility")
+    ax.set_title(f"{cfg['label']} — provider utility cascade\n"
+                 f"(iDT degradation → cDT output; shaded p10–p90)")
+    ax.set_xlim(0, cfg["sim_duration_s"])
+    _style(ax, ylim=(-0.02, 1.12))
+    ax.legend(fontsize=FS_LEGEND, loc="lower left", framealpha=0.92, ncol=1)
+    fig.tight_layout(pad=0.4)
+    _save(fig, fig_dir, "provider_comparison")
+
+
+def sweep_risk_factors(lambda_values, mu_values, scenario_key="scenario_2_idt",
+                       runs=30, base_seed=42, output_csv=None):
+    """
+    Sweep lambda (risk_q) and mu (risk_a) over given value lists.
+    Returns a DataFrame with columns: lambda, mu, mean_utility_gap, std_utility_gap.
+    """
+    try:
+        import pandas as pd
+    except ImportError:
+        raise ImportError("pandas is required. pip install pandas")
+
+    base_cfg = UNCERTAINTY_SCENARIOS[scenario_key]
+    records = []
+    for lam in lambda_values:
+        for mu in mu_values:
+            cfg = {**base_cfg, "risk_q": lam, "risk_a": mu}
+            gaps = []
+            for run_idx in range(runs):
+                seed = base_seed + run_idx
+                rows = _run_single(seed, run_idx, cfg)
+                df = pd.DataFrame(rows)
+                sigma_q_base = base_cfg["prov_a"]["sigma_q"]
+                deg_mask = df["sigma_q_A"] > sigma_q_base * 1.5
+                if deg_mask.sum() == 0:
+                    continue
+                ua_util = df.loc[deg_mask & (df["policy"] == "uncertainty_aware"),
+                                 "true_utility"]
+                qa_util = df.loc[deg_mask & (df["policy"] == "qos_aware"),
+                                 "true_utility"]
+                if len(ua_util) > 0 and len(qa_util) > 0:
+                    gaps.append(float(ua_util.mean()) - float(qa_util.mean()))
+            gap_series = pd.Series(gaps) if gaps else pd.Series([0.0])
+            records.append({
+                "lambda": lam,
+                "mu": mu,
+                "mean_utility_gap": float(gap_series.mean()),
+                "std_utility_gap":  float(gap_series.std()) if len(gaps) > 1 else 0.0,
+            })
+    result = pd.DataFrame(records)
+    if output_csv:
+        Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
+        result.to_csv(output_csv, index=False)
+    return result
+
+
+def plot_risk_factor_heatmap(df, fig_dir) -> None:
+    """Render an annotated heatmap of mean_utility_gap over (lambda, mu) grid."""
+    if not _HAS_MPL:
+        print("  [skip] matplotlib not available", file=sys.stderr)
+        return
+
+    fig_dir = Path(fig_dir)
+    lambdas = sorted(df["lambda"].unique())
+    mus = sorted(df["mu"].unique())
+    matrix = np.zeros((len(mus), len(lambdas)))
+    for i, mu in enumerate(mus):
+        for j, lam in enumerate(lambdas):
+            val = df.loc[(df["lambda"] == lam) & (df["mu"] == mu), "mean_utility_gap"]
+            matrix[i, j] = float(val.iloc[0]) if len(val) > 0 else 0.0
+
+    fig, ax = plt.subplots(figsize=(COL_W * 1.1, ROW_H * 1.4))
+    im = ax.imshow(matrix, aspect="auto", origin="lower",
+                   cmap="RdYlGn", vmin=matrix.min(), vmax=matrix.max())
+    ax.set_xticks(range(len(lambdas)))
+    ax.set_xticklabels([f"{v:.1f}" for v in lambdas], fontsize=FS_TICK)
+    ax.set_yticks(range(len(mus)))
+    ax.set_yticklabels([f"{v:.1f}" for v in mus], fontsize=FS_TICK)
+    ax.set_xlabel(r"$\lambda$ (risk$_q$)")
+    ax.set_ylabel(r"$\mu$ (risk$_a$)")
+    ax.set_title(r"Utility gap: uncertainty-aware $-$ QoS-aware" "\n"
+                 r"(during degradation windows; green = uncertainty-aware wins)")
+    for i in range(len(mus)):
+        for j in range(len(lambdas)):
+            ax.text(j, i, f"{matrix[i, j]:.3f}", ha="center", va="center",
+                    fontsize=FS_ANNOT, color="black")
+    plt.colorbar(im, ax=ax, label="Mean utility gap", shrink=0.85)
+    _style(ax)
+    fig.tight_layout(pad=0.4)
+    _save(fig, fig_dir, "risk_factor_heatmap")
+
+
 def _read_csv(path: Path) -> list[dict]:
     with open(path, newline="") as f:
         return list(csv.DictReader(f))
@@ -707,6 +867,8 @@ def _generate_plots(data_dir: Path, fig_dir: Path, scenario_key: str, cfg: dict)
     sq_B_by:  dict[int, list] = defaultdict(list)
     sa_A_by:  dict[int, list] = defaultdict(list)
     sa_B_by:  dict[int, list] = defaultdict(list)
+    util_a_by: dict[int, list] = defaultdict(list)
+    util_b_by: dict[int, list] = defaultdict(list)
 
     for r in rows:
         pol = r["policy"]
@@ -719,6 +881,10 @@ def _generate_plots(data_dir: Path, fig_dir: Path, scenario_key: str, cfg: dict)
             sq_B_by[t].append(float(r["sigma_q_B"]))
             sa_A_by[t].append(float(r["sigma_a_A"]))
             sa_B_by[t].append(float(r["sigma_a_B"]))
+            if "utility_a" in r and r["utility_a"]:
+                util_a_by[t].append(float(r["utility_a"]))
+            if "utility_b" in r and r["utility_b"]:
+                util_b_by[t].append(float(r["utility_b"]))
 
     ts = sorted(util_by["baseline"].keys())
 
@@ -811,9 +977,10 @@ def _generate_plots(data_dir: Path, fig_dir: Path, scenario_key: str, cfg: dict)
              (sa_A_by, sa_B_by, r"$\sigma_a$", r"Availability uncertainty $\sigma_a$")]):
         x, mA, _, _ = _band(d_A, ts)
         x, mB, _, _ = _band(d_B, ts)
-        ax.plot(x, mA, color=C_PROV_A, linewidth=LW, label="Provider A")
+        ax.plot(x, mA, color=C_PROV_A, linewidth=LW,
+                label=cfg.get("label_a", "Provider A"))
         ax.plot(x, mB, color=C_PROV_B, linewidth=LW, linestyle="--",
-                label="Provider B")
+                label=cfg.get("label_b", "Provider B"))
         ax.set_ylabel(ylabel)
         ax.set_title(title_sfx, fontweight="bold")
         _style(ax)
@@ -889,6 +1056,10 @@ def _generate_plots(data_dir: Path, fig_dir: Path, scenario_key: str, cfg: dict)
     fig.tight_layout(pad=0.4)
     _save(fig, fig_dir, "summary")
 
+    if util_a_by and util_b_by:
+        _plot_provider_comparison(data_dir, fig_dir, scenario_key, cfg,
+                                  util_by, util_a_by, util_b_by, ts)
+
     print(f"  [{scenario_key}] all plots done", flush=True)
 
 
@@ -936,6 +1107,8 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--scenario", choices=["1", "2", "3", "all"], default="all",
                    help="Which scenario preset to run")
+    p.add_argument("--scenarios", type=str, default=None,
+                   help="Comma-separated scenario keys, e.g. scenario_2_idt,scenario_1")
     p.add_argument("--runs",     type=int, default=30,
                    help="Number of randomised simulation runs")
     p.add_argument("--seed",     type=int, default=None,
@@ -954,9 +1127,12 @@ def main() -> None:
 
     base_seed = args.seed if args.seed is not None else random.randint(0, 2**31 - 1)
 
-    scenario_keys = (["scenario_1", "scenario_2", "scenario_3"]
-                     if args.scenario == "all"
-                     else [f"scenario_{args.scenario}"])
+    if args.scenarios is not None:
+        scenario_keys = [k.strip() for k in args.scenarios.split(",")]
+    elif args.scenario == "all":
+        scenario_keys = ["scenario_1", "scenario_2", "scenario_3"]
+    else:
+        scenario_keys = [f"scenario_{args.scenario}"]
 
     print(f"\n{'='*62}")
     print(f"  Base seed    : {base_seed}")

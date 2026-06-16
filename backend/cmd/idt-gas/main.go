@@ -34,6 +34,9 @@ type GasService struct {
 	ah       *common.ArrowheadClient
 	simFail  bool             // when true, all state endpoints return HTTP 503
 	degrade  simDegradeParams // when active, adds noise and latency
+	lkgMu    sync.RWMutex
+	lkgState common.GasSensorState
+	lkgAt    time.Time
 }
 
 func main() {
@@ -97,27 +100,38 @@ func main() {
 	log.Fatal(http.ListenAndServe(":"+port, handler))
 }
 
+func (s *GasService) simulateTick() {
+	s.mu.Lock()
+	if s.state.Online && s.state.Connected && !s.simFail {
+		g := &s.state.GasLevels
+		nf := 1.0
+		if s.degrade.active {
+			nf = s.degrade.noiseFactor
+		}
+		// Fluctuate gas levels with realistic noise (amplified when degraded)
+		g.CH4 = clamp(g.CH4+(rand.Float64()-0.48)*0.02*nf, 0, 5)
+		g.CO = clamp(g.CO+(rand.Float64()-0.48)*0.5*nf, 0, 200)
+		g.CO2 = clamp(g.CO2+(rand.Float64()-0.5)*0.005*nf, 0.03, 5)
+		g.O2 = clamp(g.O2+(rand.Float64()-0.5)*0.05*nf, 16, 25)
+		g.NO2 = clamp(g.NO2+(rand.Float64()-0.48)*0.05*nf, 0, 20)
+		s.evaluateAlerts()
+		s.state.LastUpdated = time.Now()
+		snapshot := s.state
+		s.mu.Unlock()
+		s.lkgMu.Lock()
+		s.lkgState = snapshot
+		s.lkgAt = time.Now()
+		s.lkgMu.Unlock()
+	} else {
+		s.mu.Unlock()
+	}
+}
+
 func (s *GasService) simulate() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		s.mu.Lock()
-		if s.state.Online && s.state.Connected && !s.simFail {
-			g := &s.state.GasLevels
-			nf := 1.0
-			if s.degrade.active {
-				nf = s.degrade.noiseFactor
-			}
-			// Fluctuate gas levels with realistic noise (amplified when degraded)
-			g.CH4 = clamp(g.CH4+(rand.Float64()-0.48)*0.02*nf, 0, 5)
-			g.CO = clamp(g.CO+(rand.Float64()-0.48)*0.5*nf, 0, 200)
-			g.CO2 = clamp(g.CO2+(rand.Float64()-0.5)*0.005*nf, 0.03, 5)
-			g.O2 = clamp(g.O2+(rand.Float64()-0.5)*0.05*nf, 16, 25)
-			g.NO2 = clamp(g.NO2+(rand.Float64()-0.48)*0.05*nf, 0, 20)
-			s.evaluateAlerts()
-			s.state.LastUpdated = time.Now()
-		}
-		s.mu.Unlock()
+		s.simulateTick()
 	}
 }
 
@@ -216,20 +230,40 @@ func (s *GasService) degradeLatency() {
 }
 
 func (s *GasService) handleState(w http.ResponseWriter, r *http.Request) {
-	if s.failCheck(w) {
+	s.mu.RLock()
+	fail := s.simFail
+	degraded := s.degrade.active
+	state := s.state
+	s.mu.RUnlock()
+
+	if fail {
+		s.lkgMu.RLock()
+		hasLKG := !s.lkgAt.IsZero()
+		lkg := s.lkgState
+		lkgAt := s.lkgAt
+		s.lkgMu.RUnlock()
+		if !hasLKG {
+			common.WriteError(w, 503, "sensor failure simulated")
+			return
+		}
+		staleSinceMs := time.Since(lkgAt).Milliseconds()
+		type staleResp struct {
+			common.GasSensorState
+			SimDegraded  bool  `json:"simDegraded"`
+			Stale        bool  `json:"stale"`
+			StaleSinceMs int64 `json:"staleSinceMs"`
+		}
+		common.WriteJSON(w, 200, staleResp{lkg, degraded, true, staleSinceMs})
 		return
 	}
+
 	s.degradeLatency()
-	s.mu.RLock()
-	state := s.state
-	degraded := s.degrade.active
-	s.mu.RUnlock()
-	// Include degraded flag in response so cDT2 can observe it
 	type resp struct {
 		common.GasSensorState
 		SimDegraded bool `json:"simDegraded"`
+		Stale       bool `json:"stale"`
 	}
-	common.WriteJSON(w, 200, resp{state, degraded})
+	common.WriteJSON(w, 200, resp{state, degraded, false})
 }
 
 func (s *GasService) handleMeasurements(w http.ResponseWriter, r *http.Request) {

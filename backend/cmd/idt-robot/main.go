@@ -22,6 +22,9 @@ type RobotService struct {
 	slamSlowPct       float64 // fraction of normal SLAM speed when degraded (default 0.3)
 	latencyMs         int     // extra response delay when degraded
 	slamRatePctPerSec float64 // % per second; default 0.05
+	lkgMu             sync.RWMutex
+	lkgState          common.RobotState
+	lkgAt             time.Time
 }
 
 func main() {
@@ -92,50 +95,63 @@ func main() {
 	log.Fatal(http.ListenAndServe(":"+port, handler))
 }
 
+func (s *RobotService) simulateTick() {
+	hazardTypes := []string{"loose-rock", "misfire", "structural"}
+	severities := []string{"low", "medium", "high"}
+	s.mu.Lock()
+	if s.state.Online && s.state.Connected {
+		// Battery drain
+		if s.state.BatteryPct > 0 {
+			s.state.BatteryPct = math.Max(0, s.state.BatteryPct-0.01)
+		}
+		// Position drift when navigating
+		if s.state.NavigationStatus == "navigating" {
+			s.state.Position.X += (rand.Float64() - 0.5) * 2
+			s.state.Position.Y += (rand.Float64() - 0.5) * 2
+			s.state.Position.X = math.Max(0, math.Min(100, s.state.Position.X))
+			s.state.Position.Y = math.Max(0, math.Min(100, s.state.Position.Y))
+		}
+		// SLAM / mapping progress (slowed when degraded)
+		if s.state.SlamActive && s.state.MappingProgress < 100 {
+			rate := s.slamRatePctPerSec
+			if s.degraded {
+				rate = s.slamRatePctPerSec * s.slamSlowPct
+			}
+			s.state.MappingProgress = math.Min(100, s.state.MappingProgress+rate)
+			s.state.AreaCoveredSqm = s.state.MappingProgress * 50
+		}
+		// Random hazard detection (low probability)
+		if rand.Float64() < 0.005 && len(s.state.HazardsDetected) < 5 {
+			h := common.Hazard{
+				ID:         fmt.Sprintf("haz-%d", time.Now().UnixNano()),
+				Type:       hazardTypes[rand.Intn(len(hazardTypes))],
+				Severity:   severities[rand.Intn(len(severities))],
+				Position:   common.Position{X: rand.Float64() * 100, Y: rand.Float64() * 100, Z: 0},
+				DetectedAt: time.Now(),
+				Cleared:    false,
+			}
+			s.state.HazardsDetected = append(s.state.HazardsDetected, h)
+			log.Printf("[%s] Hazard detected: %s (%s)", s.state.ID, h.Type, h.Severity)
+		}
+		s.state.LastUpdated = time.Now()
+		snapshot := s.state
+		s.mu.Unlock()
+		if !s.simFail {
+			s.lkgMu.Lock()
+			s.lkgState = snapshot
+			s.lkgAt = time.Now()
+			s.lkgMu.Unlock()
+		}
+	} else {
+		s.mu.Unlock()
+	}
+}
+
 func (s *RobotService) simulate() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	hazardTypes := []string{"loose-rock", "misfire", "structural"}
-	severities := []string{"low", "medium", "high"}
 	for range ticker.C {
-		s.mu.Lock()
-		if s.state.Online && s.state.Connected {
-			// Battery drain
-			if s.state.BatteryPct > 0 {
-				s.state.BatteryPct = math.Max(0, s.state.BatteryPct-0.01)
-			}
-			// Position drift when navigating
-			if s.state.NavigationStatus == "navigating" {
-				s.state.Position.X += (rand.Float64() - 0.5) * 2
-				s.state.Position.Y += (rand.Float64() - 0.5) * 2
-				s.state.Position.X = math.Max(0, math.Min(100, s.state.Position.X))
-				s.state.Position.Y = math.Max(0, math.Min(100, s.state.Position.Y))
-			}
-			// SLAM / mapping progress (slowed when degraded)
-			if s.state.SlamActive && s.state.MappingProgress < 100 {
-				rate := s.slamRatePctPerSec
-				if s.degraded {
-					rate = s.slamRatePctPerSec * s.slamSlowPct
-				}
-				s.state.MappingProgress = math.Min(100, s.state.MappingProgress+rate)
-				s.state.AreaCoveredSqm = s.state.MappingProgress * 50
-			}
-			// Random hazard detection (low probability)
-			if rand.Float64() < 0.005 && len(s.state.HazardsDetected) < 5 {
-				h := common.Hazard{
-					ID:         fmt.Sprintf("haz-%d", time.Now().UnixNano()),
-					Type:       hazardTypes[rand.Intn(len(hazardTypes))],
-					Severity:   severities[rand.Intn(len(severities))],
-					Position:   common.Position{X: rand.Float64() * 100, Y: rand.Float64() * 100, Z: 0},
-					DetectedAt: time.Now(),
-					Cleared:    false,
-				}
-				s.state.HazardsDetected = append(s.state.HazardsDetected, h)
-				log.Printf("[%s] Hazard detected: %s (%s)", s.state.ID, h.Type, h.Severity)
-			}
-			s.state.LastUpdated = time.Now()
-		}
-		s.mu.Unlock()
+		s.simulateTick()
 	}
 }
 
@@ -146,18 +162,37 @@ func (s *RobotService) handleState(w http.ResponseWriter, r *http.Request) {
 	degraded := s.degraded
 	state := s.state
 	s.mu.RUnlock()
+
 	if fail {
-		common.WriteError(w, 503, "robot failure simulated")
+		s.lkgMu.RLock()
+		hasLKG := !s.lkgAt.IsZero()
+		lkg := s.lkgState
+		lkgAt := s.lkgAt
+		s.lkgMu.RUnlock()
+		if !hasLKG {
+			common.WriteError(w, 503, "robot failure simulated")
+			return
+		}
+		staleSinceMs := time.Since(lkgAt).Milliseconds()
+		type staleResp struct {
+			common.RobotState
+			SimDegraded  bool  `json:"simDegraded"`
+			Stale        bool  `json:"stale"`
+			StaleSinceMs int64 `json:"staleSinceMs"`
+		}
+		common.WriteJSON(w, 200, staleResp{lkg, degraded, true, staleSinceMs})
 		return
 	}
+
 	if degraded && latMs > 0 {
 		time.Sleep(time.Duration(latMs) * time.Millisecond)
 	}
 	type resp struct {
 		common.RobotState
 		SimDegraded bool `json:"simDegraded"`
+		Stale       bool `json:"stale"`
 	}
-	common.WriteJSON(w, 200, resp{state, degraded})
+	common.WriteJSON(w, 200, resp{state, degraded, false})
 }
 
 func (s *RobotService) handleMap(w http.ResponseWriter, r *http.Request) {
