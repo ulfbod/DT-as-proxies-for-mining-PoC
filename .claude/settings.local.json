@@ -126,7 +126,10 @@
       "Read(//mnt/c/Users/uffe/Claude/**)",
       "Read(//home/uffe/Claude/Pics/**)",
       "Read(//mnt/c/Users/uffe/**)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(python:*)",
+      "Bash(go test:*)",
+      "Bash(mkdir:*)"
     ]
   }
 }
